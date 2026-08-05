@@ -1,0 +1,84 @@
+name: Release
+
+# Push a tag like v1.0.0 to build and publish a release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  FFMPEG_VERSION: "9.0"
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build universal LGPL ffmpeg
+        run: |
+          set -euo pipefail
+          # Static, LGPL-only ffmpeg + ffprobe. LGPL is guaranteed by never
+          # passing --enable-gpl/--enable-nonfree; --disable-autodetect keeps the
+          # build hermetic (system libs only); every encoder is disabled except
+          # mov_text, since the app only stream-copies and converts text subtitles.
+          curl -LsO "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz"
+          COMMON=(
+            --disable-shared --enable-static
+            --disable-programs --enable-ffmpeg --enable-ffprobe
+            --disable-doc --disable-htmlpages --disable-manpages --disable-txtpages
+            --disable-network --disable-devices --disable-autodetect
+            --enable-zlib --enable-iconv --enable-videotoolbox --extra-libs=-liconv
+            --disable-encoders --enable-encoder=movtext
+          )
+          build() {
+            local dir=$1; shift
+            tar xf "ffmpeg-${FFMPEG_VERSION}.tar.xz"
+            mv "ffmpeg-${FFMPEG_VERSION}" "$dir"
+            pushd "$dir" >/dev/null
+            ./configure "${COMMON[@]}" "$@" 2>&1 | tee configure.log
+            grep -q "License: LGPL" configure.log
+            make -j3 ffmpeg ffprobe
+            popd >/dev/null
+          }
+          build ff-arm64
+          build ff-x86_64 --enable-cross-compile --arch=x86_64 \
+            --cc="clang -arch x86_64" --extra-cflags="-arch x86_64" \
+            --extra-ldflags="-arch x86_64" --disable-x86asm
+
+          mkdir -p Beam.app/Contents/Resources
+          lipo -create -output Beam.app/Contents/Resources/ffmpeg  ff-arm64/ffmpeg  ff-x86_64/ffmpeg
+          lipo -create -output Beam.app/Contents/Resources/ffprobe ff-arm64/ffprobe ff-x86_64/ffprobe
+          cp ff-arm64/COPYING.LGPLv2.1 Beam.app/Contents/Resources/ffmpeg-LICENSE.txt
+
+      - name: Build universal app, sign, and package
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          V="${VERSION#v}"
+          # plutil takes the value as a separate argument (no shell interpolation
+          # of the tag into a command string).
+          plutil -replace CFBundleShortVersionString -string "$V" Beam.app/Contents/Info.plist
+          plutil -replace CFBundleVersion -string "$V" Beam.app/Contents/Info.plist
+
+          mkdir -p Beam.app/Contents/MacOS
+          swiftc -O -target arm64-apple-macos12  Sources/*.swift -o app-arm64
+          swiftc -O -target x86_64-apple-macos12 Sources/*.swift -o app-x86_64
+          lipo -create -output Beam.app/Contents/MacOS/Beam app-arm64 app-x86_64
+
+          chmod +x Beam.app/Contents/Resources/ffmpeg Beam.app/Contents/Resources/ffprobe
+          lipo -info Beam.app/Contents/MacOS/Beam Beam.app/Contents/Resources/ffmpeg
+
+          # Sign nested binaries first, then the whole bundle.
+          codesign --force --sign - Beam.app/Contents/Resources/ffmpeg
+          codesign --force --sign - Beam.app/Contents/Resources/ffprobe
+          codesign --force --deep --sign - Beam.app
+          ditto -c -k --keepParent Beam.app Beam.zip
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" Beam.zip --generate-notes --title "$GITHUB_REF_NAME"
