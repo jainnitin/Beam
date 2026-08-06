@@ -19,6 +19,15 @@ enum RemuxEngine {
     private static let sidecarExts: Set<String> = ["srt", "vtt", "ass", "ssa"]
     private static let playableExts: Set<String> = ["mp4", "m4v", "mov"]
 
+    // Audio codecs the Apple TV can decode directly (stream-copy). Anything else
+    // (DTS, TrueHD, FLAC, PCM, Opus…) plays silently on the TV, so it's
+    // transcoded to AC-3 — cheap on CPU, and video is never re-encoded.
+    private static let compatibleAudioCodecs: Set<String> =
+        ["aac", "ac3", "eac3", "alac", "mp3"]
+
+    // Bump when the ffmpeg recipe changes so stale cached outputs are rebuilt.
+    private static let recipe = "r2-audio"
+
     // MARK: Binary discovery
 
     static func findFFmpeg() -> URL? { findBinary("ffmpeg") }
@@ -57,6 +66,9 @@ enum RemuxEngine {
         var isHEVC = false
         var needsHvc1Fix = false
         var textSubIndices: [Int] = []
+        // Audio tracks in file (map) order, so output audio stream i lines up
+        // with audioStreams[i].
+        var audioStreams: [(codec: String, channels: Int)] = []
         let streams = ffprobe.map { probe($0, src) } ?? []
         if !streams.isEmpty {
             for s in streams {
@@ -66,6 +78,8 @@ enum RemuxEngine {
                 if type == "video", name == "hevc" || name == "h265" {
                     isHEVC = true
                     if tag == "hev1" { needsHvc1Fix = true }
+                } else if type == "audio" {
+                    audioStreams.append((name, s.channels ?? 2))
                 } else if type == "subtitle", textSubCodecs.contains(name) {
                     textSubIndices.append(s.index)
                 }
@@ -85,9 +99,12 @@ enum RemuxEngine {
             sidecar = findSidecarSubtitle(src)
         }
 
+        let audioNeedsTranscode = audioStreams.contains { !compatibleAudioCodecs.contains($0.codec) }
+
         let containerOK = playableExts.contains(ext)
-        // Nothing to do: already MP4-family, correctly tagged, no sidecar to add.
-        if containerOK && !needsHvc1Fix && sidecar == nil {
+        // Nothing to do: already MP4-family, correctly tagged, no sidecar to add,
+        // and all audio is Apple TV-compatible.
+        if containerOK && !needsHvc1Fix && sidecar == nil && !audioNeedsTranscode {
             return Result(file: src, playable: true, warning: nil)
         }
 
@@ -125,7 +142,7 @@ enum RemuxEngine {
             hasSubs = true
         }
 
-        args += ["-c:v", "copy", "-c:a", "copy"]
+        args += ["-c:v", "copy"] + audioCodecArgs(audioStreams) + ["-dn", "-map_chapters", "-1"]
         if hasSubs {
             args += ["-c:s", "mov_text"]
             if let s = sidecar {
@@ -149,7 +166,8 @@ enum RemuxEngine {
         // Subtitle muxing can occasionally fail; retry once without subtitles so
         // playback still works.
         if hasSubs {
-            var fb = ["-y", "-i", src.path, "-map", "0:v:0?", "-map", "0:a?", "-c", "copy"]
+            var fb = ["-y", "-i", src.path, "-map", "0:v:0?", "-map", "0:a?",
+                      "-c:v", "copy"] + audioCodecArgs(audioStreams) + ["-dn", "-map_chapters", "-1"]
             if isHEVC { fb += ["-tag:v", "hvc1"] }
             fb += [partial.path]
             if run(ffmpeg, fb), fm.fileExists(atPath: partial.path) {
@@ -172,6 +190,7 @@ enum RemuxEngine {
         let codec_type: String?
         let codec_name: String?
         let codec_tag_string: String?
+        let channels: Int?
     }
     private struct FFProbeOutput: Decodable { let streams: [FFStream] }
 
@@ -179,7 +198,7 @@ enum RemuxEngine {
         let proc = Process()
         proc.executableURL = ffprobe
         proc.arguments = ["-v", "error",
-                          "-show_entries", "stream=index,codec_type,codec_name,codec_tag_string",
+                          "-show_entries", "stream=index,codec_type,codec_name,codec_tag_string,channels",
                           "-of", "json", input.path]
         let out = Pipe()
         proc.standardOutput = out
@@ -207,6 +226,23 @@ enum RemuxEngine {
 
     // MARK: Helpers
 
+    // Per-output-audio-stream codec flags: copy Apple TV-compatible tracks,
+    // transcode the rest to AC-3 (downmixing above 5.1, which the AC-3 encoder
+    // can't exceed anyway). With no probe info, fall back to copying everything.
+    private static func audioCodecArgs(_ audioStreams: [(codec: String, channels: Int)]) -> [String] {
+        guard !audioStreams.isEmpty else { return ["-c:a", "copy"] }
+        var args: [String] = []
+        for (i, a) in audioStreams.enumerated() {
+            if compatibleAudioCodecs.contains(a.codec) {
+                args += ["-c:a:\(i)", "copy"]
+            } else {
+                args += ["-c:a:\(i)", "ac3", "-b:a:\(i)", "640k"]
+                if a.channels > 6 { args += ["-ac:a:\(i)", "6"] }
+            }
+        }
+        return args
+    }
+
     private static func findSidecarSubtitle(_ video: URL) -> URL? {
         let dir = video.deletingLastPathComponent()
         let base = video.deletingPathExtension().lastPathComponent.lowercased()
@@ -228,7 +264,7 @@ enum RemuxEngine {
             let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
             return "\(url.path)|\(size)|\(Int64(mtime * 1_000_000_000))"
         }
-        var parts = fingerprint(input)
+        var parts = recipe + "|" + fingerprint(input)
         parts += "|" + (sidecar.map(fingerprint) ?? "nosub")
         let digest = SHA256.hash(data: Data(parts.utf8))
         return digest.map { String(format: "%02x", $0) }.joined().prefix(10).description
