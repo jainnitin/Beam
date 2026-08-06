@@ -31,7 +31,7 @@ jobs:
             --disable-doc --disable-htmlpages --disable-manpages --disable-txtpages
             --disable-network --disable-devices --disable-autodetect
             --enable-zlib --enable-iconv --enable-videotoolbox --extra-libs=-liconv
-            --disable-encoders --enable-encoder=movtext,ac3
+            --disable-encoders --enable-encoder=movtext,ac3,aac
           )
           build() {
             local dir=$1; shift

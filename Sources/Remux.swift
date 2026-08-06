@@ -26,7 +26,7 @@ enum RemuxEngine {
         ["aac", "ac3", "eac3", "alac", "mp3"]
 
     // Bump when the ffmpeg recipe changes so stale cached outputs are rebuilt.
-    private static let recipe = "r2-audio"
+    private static let recipe = "r3-aac"
 
     // MARK: Binary discovery
 
@@ -226,15 +226,19 @@ enum RemuxEngine {
 
     // MARK: Helpers
 
-    // Per-output-audio-stream codec flags: copy Apple TV-compatible tracks,
-    // transcode the rest to AC-3 (downmixing above 5.1, which the AC-3 encoder
-    // can't exceed anyway). With no probe info, fall back to copying everything.
+    // Per-output-audio-stream codec flags: copy Apple TV-compatible tracks;
+    // transcode the rest — stereo/mono to AAC (higher quality per bit and plays
+    // on any TV, not just Dolby-capable ones), surround to AC-3 5.1 (downmixing
+    // above 5.1, which the AC-3 encoder can't exceed anyway). With no probe info,
+    // fall back to copying everything.
     private static func audioCodecArgs(_ audioStreams: [(codec: String, channels: Int)]) -> [String] {
         guard !audioStreams.isEmpty else { return ["-c:a", "copy"] }
         var args: [String] = []
         for (i, a) in audioStreams.enumerated() {
             if compatibleAudioCodecs.contains(a.codec) {
                 args += ["-c:a:\(i)", "copy"]
+            } else if a.channels <= 2 {
+                args += ["-c:a:\(i)", "aac", "-b:a:\(i)", "256k"]
             } else {
                 args += ["-c:a:\(i)", "ac3", "-b:a:\(i)", "640k"]
                 if a.channels > 6 { args += ["-ac:a:\(i)", "6"] }

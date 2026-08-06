@@ -7,12 +7,20 @@ import Foundation
 // release, downloads the arch-specific zip, and swaps the app in place. No
 // dependencies. Releases are ad-hoc signed, so the swap strips the download
 // quarantine so the new build launches without a Gatekeeper prompt.
-final class AppUpdater {
+final class AppUpdater: NSObject, URLSessionDownloadDelegate {
     private let owner = "jainnitin"
     private let repo = "Beam"
 
     // Single universal build shipped by the release workflow.
     private let assetName = "Beam.zip"
+
+    // Download UI/state. The progress window is deliberately NON-modal: a nested
+    // modal run loop would starve URLSession's delegate callbacks, which is what
+    // made an earlier version appear to hang mid-download.
+    private var progressWindow: NSWindow?
+    private var progressBar: NSProgressIndicator?
+    private var downloadTask: URLSessionDownloadTask?
+    private var installing = false
 
     private var currentVersion: String {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0"
@@ -99,28 +107,96 @@ final class AppUpdater {
             return
         }
 
-        let progress = NSAlert()
-        progress.messageText = "Downloading Beam \(version)…"
-        progress.informativeText = "Beam will relaunch when the update is ready."
-        let spinner = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: 260, height: 20))
-        spinner.style = .bar
-        spinner.isIndeterminate = true
-        spinner.startAnimation(nil)
-        progress.accessoryView = spinner
-        progress.addButton(withTitle: "Cancel")
+        startDownload(version: version, downloadURL: downloadURL)
+    }
 
-        let task = URLSession.shared.downloadTask(with: downloadURL) { [weak self] tempURL, _, error in
-            DispatchQueue.main.async {
-                NSApp.stopModal()
-                guard let self, let tempURL, error == nil else {
-                    self?.alert("Download failed", error?.localizedDescription ?? "Please try again.")
-                    return
-                }
-                self.installUpdate(zipTemp: tempURL)
-            }
-        }
+    // MARK: Non-modal, delegate-driven download
+
+    private func startDownload(version: String, downloadURL: URL) {
+        installing = false
+        showProgressWindow(version: version)
+
+        // delegateQueue = .main so progress/finish callbacks run on the main
+        // thread; the window is non-modal, so the run loop delivers them.
+        let session = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
+        let task = session.downloadTask(with: downloadURL)
+        downloadTask = task
         task.resume()
-        if progress.runModal() == .alertFirstButtonReturn { task.cancel() }
+    }
+
+    private func showProgressWindow(version: String) {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 118),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Updating Beam"
+        window.isReleasedWhenClosed = false
+        let content = NSView(frame: window.contentView!.bounds)
+
+        let label = NSTextField(labelWithString: "Downloading Beam \(version)…")
+        label.frame = NSRect(x: 20, y: 72, width: 340, height: 18)
+        content.addSubview(label)
+
+        let bar = NSProgressIndicator(frame: NSRect(x: 20, y: 46, width: 340, height: 16))
+        bar.style = .bar
+        bar.isIndeterminate = false
+        bar.minValue = 0; bar.maxValue = 1
+        content.addSubview(bar)
+        progressBar = bar
+
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelDownload))
+        cancel.bezelStyle = .rounded
+        cancel.frame = NSRect(x: 276, y: 10, width: 88, height: 28)
+        content.addSubview(cancel)
+
+        window.contentView = content
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        progressWindow = window
+    }
+
+    private func closeProgressWindow() {
+        progressWindow?.close()
+        progressWindow = nil
+        progressBar = nil
+        downloadTask = nil
+    }
+
+    @objc private func cancelDownload() {
+        downloadTask?.cancel()
+        closeProgressWindow()
+    }
+
+    // MARK: URLSessionDownloadDelegate (called on the main queue)
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64,
+                    totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        guard totalBytesExpectedToWrite > 0 else { return }
+        progressBar?.doubleValue = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL) {
+        // `location` is deleted when this method returns, so move it out now.
+        let stable = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Beam-update-\(UUID().uuidString).zip")
+        do {
+            try FileManager.default.moveItem(at: location, to: stable)
+        } catch {
+            closeProgressWindow()
+            alert("Update failed", error.localizedDescription)
+            return
+        }
+        installing = true
+        closeProgressWindow()
+        installUpdate(zipTemp: stable)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard let error, !installing else { return }
+        if (error as NSError).code == NSURLErrorCancelled { return }   // user hit Cancel
+        closeProgressWindow()
+        alert("Download failed", error.localizedDescription)
     }
 
     private func installUpdate(zipTemp: URL) {
