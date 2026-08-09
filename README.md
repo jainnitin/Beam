@@ -13,7 +13,7 @@ and no long wait.
 - AirPlay to Apple TV via the native player controls
 - Transcodes Apple TV-incompatible audio (DTS, TrueHD…) to AC-3/AAC; video is never re-encoded
 - Self-contained — a minimal LGPL build of ffmpeg is bundled, nothing to install
-- Signed with a Developer ID and notarized by Apple — launches normally
+- Signed with a Developer ID and notarized by Apple
 - Self-updates from GitHub Releases
 
 ## Requirements
@@ -22,11 +22,9 @@ and no long wait.
 
 ## Install
 
-Download `Beam.zip` from the
-[latest release](https://github.com/jainnitin/Beam/releases/latest), unzip it, and move `Beam.app` to
-`/Applications`. It's signed and notarized by Apple, so it just opens — no
-Gatekeeper workaround needed. Updates thereafter are applied in place from the
-app.
+Download `Beam.dmg` from the
+[latest release](https://github.com/jainnitin/Beam/releases/latest), open it, and
+drag **Beam** into **Applications**.
 
 ## Usage
 
