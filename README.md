@@ -11,7 +11,9 @@ and no long wait.
 - Fast stream-copy remux to MP4 (`hvc1` tagging for HEVC) — no transcoding
 - Embeds SRT/ASS subtitles, or a subtitle file you choose, as selectable tracks
 - AirPlay to Apple TV via the native player controls
+- Transcodes Apple TV-incompatible audio (DTS, TrueHD…) to AC-3/AAC; video is never re-encoded
 - Self-contained — a minimal LGPL build of ffmpeg is bundled, nothing to install
+- Signed with a Developer ID and notarized by Apple — launches normally
 - Self-updates from GitHub Releases
 
 ## Requirements
@@ -22,15 +24,9 @@ and no long wait.
 
 Download `Beam.zip` from the
 [latest release](https://github.com/jainnitin/Beam/releases/latest), unzip it, and move `Beam.app` to
-`/Applications`.
-
-The app is unsigned, so macOS quarantines it on first launch. Clear that once:
-
-```
-xattr -dr com.apple.quarantine "/Applications/Beam.app"
-```
-
-Updates thereafter are applied in place from the app.
+`/Applications`. It's signed and notarized by Apple, so it just opens — no
+Gatekeeper workaround needed. Updates thereafter are applied in place from the
+app.
 
 ## Usage
 

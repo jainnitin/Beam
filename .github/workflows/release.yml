@@ -53,9 +53,16 @@ jobs:
           lipo -create -output Beam.app/Contents/Resources/ffprobe ff-arm64/ffprobe ff-x86_64/ffprobe
           cp ff-arm64/COPYING.LGPLv2.1 Beam.app/Contents/Resources/ffmpeg-LICENSE.txt
 
-      - name: Build universal app, sign, and package
+      - name: Build universal app, sign, notarize, and package
         env:
           VERSION: ${{ github.ref_name }}
+          # Signing/notarization secrets (see README). When absent, the build
+          # falls back to ad-hoc signing so forks still produce a working app.
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         run: |
           set -euo pipefail
           V="${VERSION#v}"
@@ -72,10 +79,45 @@ jobs:
           chmod +x Beam.app/Contents/Resources/ffmpeg Beam.app/Contents/Resources/ffprobe
           lipo -info Beam.app/Contents/MacOS/Beam Beam.app/Contents/Resources/ffmpeg
 
-          # Sign nested binaries first, then the whole bundle.
-          codesign --force --sign - Beam.app/Contents/Resources/ffmpeg
-          codesign --force --sign - Beam.app/Contents/Resources/ffprobe
-          codesign --force --deep --sign - Beam.app
+          if [ -n "$MACOS_CERT_P12_BASE64" ]; then
+            echo "Developer ID signing + notarization"
+            # Import the cert into a throwaway keychain.
+            KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+            KPW="$(uuidgen)"
+            security create-keychain -p "$KPW" "$KEYCHAIN"
+            security set-keychain-settings -lut 21600 "$KEYCHAIN"
+            security unlock-keychain -p "$KPW" "$KEYCHAIN"
+            echo "$MACOS_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+            security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" \
+              -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple: -s -k "$KPW" "$KEYCHAIN" >/dev/null
+            security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed 's/"//g')
+            IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+              | awk -F'"' '/Developer ID Application/{print $2; exit}')"
+            echo "Signing identity: $IDENTITY"
+
+            SIGN=(codesign --force --options runtime --timestamp --sign "$IDENTITY" --keychain "$KEYCHAIN")
+            # Inside-out: nested tools first, then the app bundle.
+            "${SIGN[@]}" Beam.app/Contents/Resources/ffmpeg
+            "${SIGN[@]}" Beam.app/Contents/Resources/ffprobe
+            "${SIGN[@]}" Beam.app
+            codesign --verify --strict --verbose=2 Beam.app
+
+            # Notarize the app, then staple the ticket so it launches offline.
+            echo "$APPLE_API_KEY_P8_BASE64" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+            ditto -c -k --keepParent Beam.app notarize.zip
+            xcrun notarytool submit notarize.zip \
+              --key "$RUNNER_TEMP/AuthKey.p8" --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER_ID" --wait
+            xcrun stapler staple Beam.app
+            spctl --assess --type execute --verbose=4 Beam.app
+          else
+            echo "No signing secrets present — ad-hoc signing (Gatekeeper will quarantine)."
+            codesign --force --sign - Beam.app/Contents/Resources/ffmpeg
+            codesign --force --sign - Beam.app/Contents/Resources/ffprobe
+            codesign --force --deep --sign - Beam.app
+          fi
+
           ditto -c -k --keepParent Beam.app Beam.zip
 
       - name: Publish release
