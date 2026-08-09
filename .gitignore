@@ -3,7 +3,6 @@
 
 # swiftc precompiled module cache
 .module-cache/
-
 # Build output — produced locally and by the release workflow, never committed
 Beam.app/Contents/MacOS/
 Beam.app/Contents/_CodeSignature/
@@ -13,3 +12,4 @@ Beam.app/Contents/Resources/ffmpeg-LICENSE.txt
 build-arm64
 build-x86_64
 Beam.zip
+.signing/
